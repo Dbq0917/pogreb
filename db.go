@@ -388,8 +388,11 @@ func (db *DB) sync() error {
 }
 
 // Items returns a new ItemIterator.
+// The iterator iterates over a snapshot of the database taken at the moment the iterator was created.
 func (db *DB) Items() *ItemIterator {
-	return &ItemIterator{db: db}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return newItemIterator(db)
 }
 
 // Sync commits the contents of the database to the backing FileSystem.

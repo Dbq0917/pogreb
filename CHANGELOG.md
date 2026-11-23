@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Changed
+- `ItemIterator` now iterates over a snapshot of the database taken at the moment the iterator was created. Writes performed while iterating don't affect the items returned by the iterator.
+
 ## [0.10.2] - 2023-12-10
 ### Fixed
 - Fix an edge case causing recovery to fail.

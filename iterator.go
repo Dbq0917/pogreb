@@ -13,17 +13,34 @@ type item struct {
 	value []byte
 }
 
-// ItemIterator is an iterator over DB key-value pairs. It iterates the items in an unspecified order.
+// ItemIterator is an iterator over DB key-value pairs.
+// The iterator iterates over a snapshot of the database taken at the moment the iterator was created.
+// Writes performed while iterating don't affect the items returned by the iterator.
+// It iterates the items in an unspecified order.
 type ItemIterator struct {
-	db            *DB
-	nextBucketIdx uint32
-	queue         []item
-	mu            sync.Mutex
+	items       []item
+	nextItemIdx int
+	err         error
+	mu          sync.Mutex
 }
 
-// fetchItems adds items to the iterator queue from a bucket located at nextBucketIdx.
-func (it *ItemIterator) fetchItems(nextBucketIdx uint32) error {
-	bit := it.db.index.newBucketIterator(nextBucketIdx)
+// newItemIterator returns a new ItemIterator iterating over a snapshot of the database.
+// The caller must hold the db.mu read lock.
+func newItemIterator(db *DB) *ItemIterator {
+	it := &ItemIterator{}
+	for bucketIdx := uint32(0); bucketIdx < db.index.numBuckets; bucketIdx++ {
+		if err := it.fetchItems(db, bucketIdx); err != nil {
+			it.items = nil
+			it.err = err
+			return it
+		}
+	}
+	return it
+}
+
+// fetchItems appends items from a bucket located at bucketIdx to the iterator snapshot.
+func (it *ItemIterator) fetchItems(db *DB, bucketIdx uint32) error {
+	bit := db.index.newBucketIterator(bucketIdx)
 	for {
 		b, err := bit.next()
 		if err == ErrIterationDone {
@@ -38,13 +55,13 @@ func (it *ItemIterator) fetchItems(nextBucketIdx uint32) error {
 				// No more items in the bucket.
 				break
 			}
-			key, value, err := it.db.datalog.readKeyValue(sl)
+			key, value, err := db.datalog.readKeyValue(sl)
 			if err != nil {
 				return err
 			}
 			key = cloneBytes(key)
 			value = cloneBytes(value)
-			it.queue = append(it.queue, item{key: key, value: value})
+			it.items = append(it.items, item{key: key, value: value})
 		}
 	}
 }
@@ -54,20 +71,13 @@ func (it *ItemIterator) Next() ([]byte, []byte, error) {
 	it.mu.Lock()
 	defer it.mu.Unlock()
 
-	it.db.mu.RLock()
-	defer it.db.mu.RUnlock()
-
-	// The iterator queue is empty and we have more buckets to check.
-	for len(it.queue) == 0 && it.nextBucketIdx < it.db.index.numBuckets {
-		if err := it.fetchItems(it.nextBucketIdx); err != nil {
-			return nil, nil, err
-		}
-		it.nextBucketIdx++
+	if it.err != nil {
+		return nil, nil, it.err
 	}
 
-	if len(it.queue) > 0 {
-		item := it.queue[0]
-		it.queue = it.queue[1:]
+	if it.nextItemIdx < len(it.items) {
+		item := it.items[it.nextItemIdx]
+		it.nextItemIdx++
 		return item.key, item.value, nil
 	}
 
