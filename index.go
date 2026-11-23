@@ -37,6 +37,11 @@ type indexMeta struct {
 // matchKeyFunc returns whether the slot matches the key sought.
 type matchKeyFunc func(slot) (bool, error)
 
+type recordLocation struct {
+	segmentID uint16
+	offset    uint32
+}
+
 func openIndex(opts *Options) (*index, error) {
 	main, err := openFile(opts.FileSystem, indexMainName, openFileFlags{})
 	if err != nil {
@@ -156,6 +161,30 @@ func (idx *index) get(hash uint32, matchKey matchKeyFunc) error {
 			}
 		}
 	}
+}
+
+func (idx *index) liveLocations() (map[recordLocation]struct{}, error) {
+	locations := make(map[recordLocation]struct{}, idx.numBuckets*slotsPerBucket)
+	for bucketIdx := uint32(0); bucketIdx < idx.numBuckets; bucketIdx++ {
+		it := idx.newBucketIterator(bucketIdx)
+		for {
+			b, err := it.next()
+			if err == ErrIterationDone {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			for i := 0; i < slotsPerBucket; i++ {
+				sl := b.slots[i]
+				if sl.offset == 0 {
+					break
+				}
+				locations[recordLocation{segmentID: sl.segmentID, offset: sl.offset}] = struct{}{}
+			}
+		}
+	}
+	return locations, nil
 }
 
 func (idx *index) findInsertionBucket(newSlot slot, matchKey matchKeyFunc) (*slotWriter, bool, error) {

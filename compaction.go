@@ -58,6 +58,10 @@ func (db *DB) compact(sourceSeg *segment) (CompactionResult, error) {
 
 	db.mu.Lock()
 	sourceSeg.meta.Full = true // Prevent writes to the compacted file.
+	sourceSeg.compacting = true
+	sourceSeg.freeBlocks = nil
+	sourceSeg.freeSizes = nil
+	sourceSeg.freeEnds = nil
 	db.mu.Unlock()
 
 	it, err := newSegmentIterator(sourceSeg)
@@ -73,16 +77,13 @@ func (db *DB) compact(sourceSeg *segment) (CompactionResult, error) {
 			if err != nil {
 				return err
 			}
-			if rec.rtype == recordTypeDelete {
-				cr.ReclaimedRecords++
-				cr.ReclaimedBytes += len(rec.data)
+			if rec.rtype == recordTypeFree {
 				return nil
 			}
-			reclaimed, err := db.promoteRecord(rec)
-			if reclaimed {
-				cr.ReclaimedRecords++
-				cr.ReclaimedBytes += len(rec.data)
+			if rec.rtype == recordTypeDelete {
+				return nil
 			}
+			_, err = db.promoteRecord(rec)
 			return err
 		}()
 		if err == ErrIterationDone {
@@ -95,6 +96,8 @@ func (db *DB) compact(sourceSeg *segment) (CompactionResult, error) {
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	cr.ReclaimedRecords = int(sourceSeg.meta.DeletedKeys + sourceSeg.meta.DeleteRecords)
+	cr.ReclaimedBytes = int(sourceSeg.meta.DeletedBytes)
 	err = db.datalog.removeSegment(sourceSeg)
 	return cr, err
 }

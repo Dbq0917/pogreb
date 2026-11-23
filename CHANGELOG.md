@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Changed
+- Deleted and overwritten record space is now reused in place. Once a database reaches 70% deleted space, obsolete records are marked as free and subsequent writes reuse those ranges without changing read or write semantics.
+
 ## [0.10.2] - 2023-12-10
 ### Fixed
 - Fix an edge case causing recovery to fail.

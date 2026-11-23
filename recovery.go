@@ -125,6 +125,11 @@ func (db *DB) recover() error {
 
 		h := db.hash(rec.key)
 		meta := db.datalog.segments[rec.segmentID].meta
+		if rec.rtype == recordTypeFree {
+			seg := db.datalog.segments[rec.segmentID]
+			seg.addFreeBlock(rec.offset, uint32(len(rec.data)))
+			continue
+		}
 		if rec.rtype == recordTypePut {
 			sl := slot{
 				hash:      h,
@@ -133,7 +138,7 @@ func (db *DB) recover() error {
 				valueSize: uint32(len(rec.value)),
 				offset:    rec.offset,
 			}
-			if err := db.put(sl, rec.key); err != nil {
+			if err := db.put(sl, rec.key, true); err != nil {
 				return err
 			}
 			meta.PutRecords++
@@ -143,6 +148,13 @@ func (db *DB) recover() error {
 			}
 			meta.DeleteRecords++
 			meta.DeletedBytes += uint32(len(rec.data))
+		}
+	}
+
+	if db.datalog.shouldReuse() || db.datalog.hasFreeBlocks() {
+		db.datalog.reuse = true
+		if err := db.reclaimObsoleteRecords(); err != nil {
+			return err
 		}
 	}
 

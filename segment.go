@@ -13,8 +13,16 @@ type recordType int
 const (
 	recordTypePut recordType = iota
 	recordTypeDelete
+	recordTypeFree
 
 	segmentExt = ".psg"
+
+	recordFlagDelete = uint32(1) << 31
+	recordFlagFree   = uint32(1) << 30
+
+	// Free records are split into bounded chunks so recovery never has to
+	// allocate a single buffer close to the maximum segment size.
+	maxFreeRecordSize = 1 << 20
 )
 
 // segment is a write-ahead log segment.
@@ -25,6 +33,10 @@ type segment struct {
 	sequenceID uint64 // Logical monotonically increasing segment identifier.
 	name       string
 	meta       *segmentMeta
+	freeBlocks map[uint32]uint32              // Free range offsets to sizes.
+	freeSizes  map[uint32]map[uint32]struct{} // Free range sizes to offsets.
+	freeEnds   map[uint32]uint32              // Free range end offsets to start offsets.
+	compacting bool
 }
 
 func segmentName(id uint16, sequenceID uint64) string {
@@ -87,6 +99,19 @@ func encodeDeleteRecord(key []byte) []byte {
 	return encodeRecord(key, nil, recordTypeDelete)
 }
 
+// encodeFreeRecord fills dst with one free record. dst must be at least
+// minFreeRecordSize bytes long.
+func encodeFreeRecord(dst []byte) {
+	payloadSize := uint32(len(dst) - 10)
+	binary.LittleEndian.PutUint16(dst[:2], 0)
+	binary.LittleEndian.PutUint32(dst[2:6], recordFlagDelete|recordFlagFree|payloadSize)
+	for i := 6; i < len(dst)-4; i++ {
+		dst[i] = 0
+	}
+	checksum := crc32.ChecksumIEEE(dst[:len(dst)-4])
+	binary.LittleEndian.PutUint32(dst[len(dst)-4:], checksum)
+}
+
 // segmentIterator iterates over segment records.
 type segmentIterator struct {
 	f      *segment
@@ -123,9 +148,12 @@ func (it *segmentIterator) next() (record, error) {
 	// Decode value size and record type.
 	rt := recordTypePut
 	valueSize := binary.LittleEndian.Uint32(kvSizeBuf[2:])
-	if valueSize&(1<<31) != 0 {
+	if valueSize&recordFlagFree != 0 {
+		rt = recordTypeFree
+		valueSize &^= recordFlagFree | recordFlagDelete
+	} else if valueSize&recordFlagDelete != 0 {
 		rt = recordTypeDelete
-		valueSize &^= 1 << 31
+		valueSize &^= recordFlagDelete
 	}
 
 	// Read key, value and checksum.
@@ -144,6 +172,14 @@ func (it *segmentIterator) next() (record, error) {
 
 	offset := it.offset
 	it.offset += recordSize
+	if rt == recordTypeFree {
+		return record{
+			rtype:     rt,
+			segmentID: it.f.id,
+			offset:    offset,
+			data:      data,
+		}, nil
+	}
 	rec := record{
 		rtype:     rt,
 		segmentID: it.f.id,

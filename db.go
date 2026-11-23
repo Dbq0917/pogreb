@@ -270,7 +270,7 @@ func (db *DB) Has(key []byte) (bool, error) {
 	return found, nil
 }
 
-func (db *DB) put(sl slot, key []byte) error {
+func (db *DB) put(sl slot, key []byte, trackDel bool) error {
 	return db.index.put(sl, func(cursl slot) (bool, error) {
 		if uint16(len(key)) != cursl.keySize {
 			return false, nil
@@ -280,11 +280,34 @@ func (db *DB) put(sl slot, key []byte) error {
 			return true, err
 		}
 		if bytes.Equal(key, slKey) {
-			db.datalog.trackDel(cursl) // Overwriting existing key.
+			if trackDel {
+				db.datalog.trackDel(cursl) // Overwriting existing key.
+			}
 			return true, nil
 		}
 		return false, nil
 	})
+}
+
+func (db *DB) findSlot(hash uint32, key []byte) (slot, bool, error) {
+	var found slot
+	ok := false
+	err := db.index.get(hash, func(sl slot) (bool, error) {
+		if uint16(len(key)) != sl.keySize {
+			return false, nil
+		}
+		slKey, err := db.datalog.readKey(sl)
+		if err != nil {
+			return true, err
+		}
+		if bytes.Equal(key, slKey) {
+			found = sl
+			ok = true
+			return true, nil
+		}
+		return false, nil
+	})
+	return found, ok, err
 }
 
 // Put sets the value for the given key. It updates the value for the existing key.
@@ -300,7 +323,21 @@ func (db *DB) Put(key []byte, value []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	segID, offset, err := db.datalog.put(key, value)
+	var oldSlot slot
+	found := false
+	if db.datalog.reuse {
+		var err error
+		oldSlot, found, err = db.findSlot(h, key)
+		if err != nil {
+			return err
+		}
+	}
+
+	var after *slot
+	if found {
+		after = &oldSlot
+	}
+	segID, offset, err := db.datalog.put(key, value, after)
 	if err != nil {
 		return err
 	}
@@ -313,8 +350,15 @@ func (db *DB) Put(key []byte, value []byte) error {
 		offset:    offset,
 	}
 
-	if err := db.put(sl, key); err != nil {
+	if err := db.put(sl, key, !db.datalog.reuse); err != nil {
 		return err
+	}
+
+	if db.datalog.reuse && found {
+		db.datalog.trackDel(oldSlot)
+		if err := db.datalog.freeSlot(oldSlot); err != nil {
+			return err
+		}
 	}
 
 	if db.syncWrites {
@@ -336,7 +380,7 @@ func (db *DB) del(h uint32, key []byte, writeWAL bool) error {
 			db.datalog.trackDel(sl)
 			var err error
 			if writeWAL {
-				err = db.datalog.del(key)
+				_, _, err = db.datalog.del(key)
 			}
 			return true, err
 		}
@@ -351,9 +395,39 @@ func (db *DB) Delete(key []byte) error {
 	db.metrics.Dels.Add(1)
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if err := db.del(h, key, true); err != nil {
+
+	oldSlot, found, err := db.findSlot(h, key)
+	if err != nil {
 		return err
 	}
+	if !found {
+		return nil
+	}
+
+	delSegID, delOffset, err := db.datalog.del(key, &oldSlot)
+	if err != nil {
+		return err
+	}
+	err = db.index.delete(h, func(sl slot) (bool, error) {
+		return sl.segmentID == oldSlot.segmentID && sl.offset == oldSlot.offset, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	db.datalog.trackDel(oldSlot)
+	if db.datalog.reuse {
+		if err := db.datalog.freeSlot(oldSlot); err != nil {
+			return err
+		}
+		delSize := encodedRecordSize(uint32(len(key)))
+		if err := db.datalog.freeRange(delSegID, delOffset, delSize); err != nil {
+			return err
+		}
+	} else if err := db.maybeEnableReuse(); err != nil {
+		return err
+	}
+
 	if db.syncWrites {
 		return db.sync()
 	}

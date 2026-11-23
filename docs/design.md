@@ -17,13 +17,13 @@ It aims to provide fast point lookups by indexing keys in an on-disk hash table.
 # Design
 
 Two key components of Pogreb are a write-ahead log (WAL) and a hash table index.
-The WAL stores key-value pairs on disk in append-only files.
+The WAL stores key-value pairs on disk in segment files.
 The on-disk hash table allows constant time lookups from keys to key-value pairs in the WAL.
 
 ## Write-ahead log
 
-The WAL consists of multiple append-only segments. Once the current segment file is full (reaches 4 GB), a new segment
-is created, the full segment becomes read-only.
+The WAL consists of multiple segments. Once the current segment file is full (reaches 4 GB), a new segment
+is created, the full segment becomes read-only. Obsolete records are reused in place to bound segment growth.
 
 ```
 Write-ahead log
@@ -52,7 +52,7 @@ Record
 +---------------+------------------+------------------+-...-+--...--+----------+
 ```
 
-The Record Type field is either `Put` (0) or `Delete` (1).
+The Record Type field is either `Put` (0), `Delete` (1), or `Free` (2).
 
 ## Hash table index
 
@@ -151,6 +151,11 @@ and value from the WAL.
 Insertion is performed by adding a new "put" record to the WAL and updating a bucket in the index.
 If the bucket has all of its slots occupied, a new overflow bucket is created.
 
+When enough space has been deleted, obsolete records are marked with `Free` records and tracked in a
+per-segment free list. New records first reuse the best-fitting free range before appending to the
+current segment. For overwrites, reused space must be located after the previous record for the same
+key so recovery still observes the new value last.
+
 ### Split
 
 When the number of items in the hash table exceeds the load factor threshold (70%), the split operation is performed on
@@ -170,8 +175,12 @@ and then appends a new "delete" record to the WAL.
 
 ## Compaction
 
-Since the WAL is append-only, the disk space occupied by overwritten or deleted keys is not reclaimed immediately.
+Because live records remain in place, the disk space occupied by overwritten or deleted keys is reclaimed opportunistically.
 Pogreb supports optional online compaction.
+
+Deleted space is also reused in place. Once the deleted space in the WAL reaches 70%, records that are
+no longer referenced by the index are replaced with free records. The free list is persisted next to
+each segment and rebuilt by scanning the WAL during recovery.
 
 Every time a key is overwritten or deleted, Pogreb increments the number of "deleted" bytes and keys for the
 corresponding WAL segment.
@@ -186,6 +195,7 @@ After the compaction is successfully finished, the compacted segment files are r
 In the event of a crash caused by a power loss or an operating system failure, Pogreb discards the index and replays the
 WAL building a new index from scratch.
 Segments are iterated from the oldest to the newest and items are inserted into the index.
+`Free` records are skipped, so reused ranges never resurrect deleted or overwritten keys.
 
 # Limitations
 
