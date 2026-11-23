@@ -151,6 +151,11 @@ and value from the WAL.
 Insertion is performed by adding a new "put" record to the WAL and updating a bucket in the index.
 If the bucket has all of its slots occupied, a new overflow bucket is created.
 
+When synchronous writes are enabled, a write returns only after its WAL record is committed to disk.
+Concurrent writes are group-committed: a single file system sync commits the whole batch of pending
+records. Only the current segment may contain records that are not yet committed - a segment is
+synced before it becomes read-only.
+
 ### Split
 
 When the number of items in the hash table exceeds the load factor threshold (70%), the split operation is performed on

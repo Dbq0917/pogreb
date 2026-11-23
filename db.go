@@ -38,6 +38,12 @@ type DB struct {
 	hashSeed       uint32
 	metrics        *Metrics
 	syncWrites     bool
+	syncMu         sync.Mutex
+	syncCond       sync.Cond // Signaled when a group sync completes.
+	writeSeq       uint64    // Number of writes that must be committed to disk before returning.
+	syncedSeq      uint64    // Writes up to syncedSeq are committed to disk.
+	syncErr        error     // Error of the sync that covered syncedSeq.
+	syncing        bool      // A goroutine is performing a sync.
 	cancelBgWorker context.CancelFunc
 	closeWg        sync.WaitGroup
 	maintenanceMu  sync.Mutex // Ensures there only one maintenance task running at a time.
@@ -92,6 +98,7 @@ func Open(path string, opts *Options) (*DB, error) {
 		metrics:    &Metrics{},
 		syncWrites: opts.BackgroundSyncInterval == -1,
 	}
+	db.syncCond.L = &db.syncMu
 	if index.count() == 0 {
 		// The index is empty, make a new hash seed.
 		seed, err := hash.RandSeed()
@@ -298,27 +305,30 @@ func (db *DB) Put(key []byte, value []byte) error {
 	h := db.hash(key)
 	db.metrics.Puts.Add(1)
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	segID, offset, err := db.datalog.put(key, value)
+	if err == nil {
+		sl := slot{
+			hash:      h,
+			segmentID: segID,
+			keySize:   uint16(len(key)),
+			valueSize: uint32(len(value)),
+			offset:    offset,
+		}
+		err = db.put(sl, key)
+	}
+	var seq uint64
+	if err == nil && db.syncWrites {
+		seq = db.nextWriteSeq()
+	}
+	db.mu.Unlock()
 	if err != nil {
 		return err
 	}
-
-	sl := slot{
-		hash:      h,
-		segmentID: segID,
-		keySize:   uint16(len(key)),
-		valueSize: uint32(len(value)),
-		offset:    offset,
-	}
-
-	if err := db.put(sl, key); err != nil {
-		return err
-	}
-
 	if db.syncWrites {
-		return db.sync()
+		// Wait for the write to become durable.
+		// Concurrent writes are committed by a single group sync.
+		return db.waitSync(seq)
 	}
 	return nil
 }
@@ -350,12 +360,17 @@ func (db *DB) Delete(key []byte) error {
 	h := db.hash(key)
 	db.metrics.Dels.Add(1)
 	db.mu.Lock()
-	defer db.mu.Unlock()
-	if err := db.del(h, key, true); err != nil {
+	err := db.del(h, key, true)
+	var seq uint64
+	if err == nil && db.syncWrites {
+		seq = db.nextWriteSeq()
+	}
+	db.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	if db.syncWrites {
-		return db.sync()
+		return db.waitSync(seq)
 	}
 	return nil
 }
@@ -383,6 +398,39 @@ func (db *DB) Close() error {
 	return nil
 }
 
+// nextWriteSeq assigns a sequence number to a write that needs to be committed to disk.
+// It must be called with db.mu held.
+func (db *DB) nextWriteSeq() uint64 {
+	db.syncMu.Lock()
+	defer db.syncMu.Unlock()
+	db.writeSeq++
+	return db.writeSeq
+}
+
+// waitSync blocks until all writes up to and including seq are committed to disk.
+// Concurrent writes are grouped together and committed by a single file system sync.
+func (db *DB) waitSync(seq uint64) error {
+	db.syncMu.Lock()
+	defer db.syncMu.Unlock()
+	for db.syncedSeq < seq {
+		if db.syncing {
+			db.syncCond.Wait()
+			continue
+		}
+		// No sync is in progress - perform the sync for the whole group.
+		db.syncing = true
+		target := db.writeSeq
+		db.syncMu.Unlock()
+		err := db.sync()
+		db.syncMu.Lock()
+		db.syncedSeq = target
+		db.syncErr = err
+		db.syncing = false
+		db.syncCond.Broadcast()
+	}
+	return db.syncErr
+}
+
 func (db *DB) sync() error {
 	return db.datalog.sync()
 }
@@ -394,9 +442,11 @@ func (db *DB) Items() *ItemIterator {
 
 // Sync commits the contents of the database to the backing FileSystem.
 func (db *DB) Sync() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	return db.sync()
+	db.syncMu.Lock()
+	db.writeSeq++
+	seq := db.writeSeq
+	db.syncMu.Unlock()
+	return db.waitSync(seq)
 }
 
 // Count returns the number of keys in the DB.

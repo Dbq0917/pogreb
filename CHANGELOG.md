@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Changed
+- Synchronous writes (`BackgroundSyncInterval: -1`) are now group-committed: concurrent writes are committed to disk by a single file system sync instead of one sync per write.
+
 ## [0.10.2] - 2023-12-10
 ### Fixed
 - Fix an edge case causing recovery to fail.

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/akrylysov/pogreb/internal/errors"
 )
@@ -20,6 +21,7 @@ const (
 type datalog struct {
 	opts          *Options
 	curSeg        *segment
+	curSegMu      sync.RWMutex // Coordinates segment syncs with segment swaps and removals.
 	segments      [maxSegments]*segment
 	maxSequenceID uint64
 }
@@ -116,6 +118,8 @@ func (dl *datalog) nextWritableSegmentID() (uint16, uint64, error) {
 }
 
 func (dl *datalog) swapSegment() error {
+	dl.curSegMu.Lock()
+	defer dl.curSegMu.Unlock()
 	// Pick unfilled segment.
 	for _, seg := range dl.segments {
 		if seg != nil && !seg.meta.Full {
@@ -145,6 +149,8 @@ func (dl *datalog) swapSegment() error {
 func (dl *datalog) removeSegment(seg *segment) error {
 	dl.segments[seg.id] = nil
 
+	dl.curSegMu.Lock()
+	defer dl.curSegMu.Unlock()
 	if err := seg.Close(); err != nil {
 		return err
 	}
@@ -199,7 +205,11 @@ func (dl *datalog) del(key []byte) error {
 
 func (dl *datalog) writeRecord(data []byte, rt recordType) (uint16, uint32, error) {
 	if dl.curSeg.meta.Full || dl.curSeg.size+int64(len(data)) > int64(dl.opts.maxSegmentSize) {
-		// Current segment is full, create a new one.
+		// Current segment is full, sync it before making it read-only.
+		// Only the current segment may contain records that are not committed to disk.
+		if err := dl.curSeg.Sync(); err != nil {
+			return 0, 0, err
+		}
 		dl.curSeg.meta.Full = true
 		if err := dl.swapSegment(); err != nil {
 			return 0, 0, err
@@ -223,10 +233,14 @@ func (dl *datalog) put(key []byte, value []byte) (uint16, uint32, error) {
 }
 
 func (dl *datalog) sync() error {
+	dl.curSegMu.RLock()
+	defer dl.curSegMu.RUnlock()
 	return dl.curSeg.Sync()
 }
 
 func (dl *datalog) close() error {
+	dl.curSegMu.Lock()
+	defer dl.curSegMu.Unlock()
 	for _, seg := range dl.segments {
 		if seg == nil {
 			continue
