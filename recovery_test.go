@@ -1,9 +1,12 @@
 package pogreb
 
 import (
+	"fmt"
 	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/akrylysov/pogreb/fs"
 	"github.com/akrylysov/pogreb/internal/assert"
 )
 
@@ -245,5 +248,51 @@ func TestRecoveryIterator(t *testing.T) {
 		listRecords(),
 	)
 
+	assert.Nil(t, db.Close())
+}
+
+func TestRecoveryMemory(t *testing.T) {
+	if testFS == fs.Mem {
+		t.Skip("the in-memory file system stores the entire database in memory")
+	}
+
+	const numKeys = 100000
+	opts := &Options{FileSystem: testFS}
+	db, err := createTestDB(opts)
+	assert.Nil(t, err)
+	for i := 0; i < numKeys; i++ {
+		key := []byte(fmt.Sprintf("key-%09d", i))
+		if err := db.Put(key, key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assert.Equal(t, uint32(numKeys), db.Count())
+	assert.Nil(t, db.Close())
+
+	// Simulate a crash to force the index rebuild on the next open.
+	assert.Nil(t, touchFile(testFS, filepath.Join(testDBName, lockName)))
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	db, err = Open(testDBName, opts)
+	assert.Nil(t, err)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	const maxAlloc = uint64(128 << 20)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > maxAlloc {
+		t.Fatalf("recovery allocated %d bytes for %d keys, want at most %d", allocated, numKeys, maxAlloc)
+	}
+
+	assert.Equal(t, uint32(numKeys), db.Count())
+	for i := 0; i < numKeys; i += numKeys / 1000 {
+		key := []byte(fmt.Sprintf("key-%09d", i))
+		value, err := db.Get(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assert.Equal(t, key, value)
+	}
 	assert.Nil(t, db.Close())
 }

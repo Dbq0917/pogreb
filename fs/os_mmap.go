@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	initialMmapSize = 1024 << 20 // 1 GiB
+	initialMmapSize = 64 << 20 // 64 MiB
 )
 
 type osMMapFS struct {
@@ -144,6 +144,10 @@ func (f *osMMapFile) mremap() error {
 		if err := f.munmap(); err != nil {
 			return err
 		}
+		mmapSize *= 2
+	}
+
+	for mmapSize < f.size {
 		mmapSize *= 2
 	}
 

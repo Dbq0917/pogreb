@@ -158,44 +158,43 @@ func (idx *index) get(hash uint32, matchKey matchKeyFunc) error {
 	}
 }
 
-func (idx *index) findInsertionBucket(newSlot slot, matchKey matchKeyFunc) (*slotWriter, bool, error) {
-	sw := &slotWriter{}
+func (idx *index) findInsertionBucket(sw *slotWriter, newSlot slot, matchKey matchKeyFunc) (bool, error) {
 	it := idx.newBucketIterator(idx.bucketIndex(newSlot.hash))
 	for {
 		b, err := it.next()
 		if err == ErrIterationDone {
-			return nil, false, errors.New("failed to insert a new slot")
+			return false, errors.New("failed to insert a new slot")
 		}
 		if err != nil {
-			return nil, false, err
+			return false, err
 		}
-		sw.bucket = &b
+		sw.bucket = b
 		var i int
 		for i = 0; i < slotsPerBucket; i++ {
 			sl := b.slots[i]
 			if sl.offset == 0 {
 				// Found an empty slot.
 				sw.slotIdx = i
-				return sw, false, nil
+				return false, nil
 			}
 			if newSlot.hash != sl.hash {
 				continue
 			}
 			match, err := matchKey(sl)
 			if err != nil {
-				return nil, false, err
+				return false, err
 			}
 			if match {
 				// Key already in the index.
 				// The slot writer will overwrite the existing slot.
 				sw.slotIdx = i
-				return sw, true, nil
+				return true, nil
 			}
 		}
 		if b.next == 0 {
 			// No more buckets in the chain.
 			sw.slotIdx = i
-			return sw, false, nil
+			return false, nil
 		}
 	}
 }
@@ -204,7 +203,8 @@ func (idx *index) put(newSlot slot, matchKey matchKeyFunc) error {
 	if idx.numKeys == MaxKeys {
 		return errFull
 	}
-	sw, overwritingExisting, err := idx.findInsertionBucket(newSlot, matchKey)
+	sw := &slotWriter{}
+	overwritingExisting, err := idx.findInsertionBucket(sw, newSlot, matchKey)
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,7 @@ func (idx *index) delete(hash uint32, matchKey matchKeyFunc) error {
 	}
 }
 
-func (idx *index) createOverflowBucket() (*bucketHandle, error) {
+func (idx *index) createOverflowBucket() (bucketHandle, error) {
 	var off int64
 	if len(idx.freeBucketOffs) > 0 {
 		off = idx.freeBucketOffs[0]
@@ -270,10 +270,10 @@ func (idx *index) createOverflowBucket() (*bucketHandle, error) {
 		var err error
 		off, err = idx.overflow.extend(bucketSize)
 		if err != nil {
-			return nil, err
+			return bucketHandle{}, err
 		}
 	}
-	return &bucketHandle{file: idx.overflow, offset: off}, nil
+	return bucketHandle{file: idx.overflow, offset: off}, nil
 }
 
 func (idx *index) freeOverflowBucket(offsets ...int64) {
@@ -284,7 +284,7 @@ func (idx *index) split() error {
 	updatedBucketIdx := idx.splitBucketIdx
 	updatedBucketOff := bucketOffset(updatedBucketIdx)
 	updatedBucket := slotWriter{
-		bucket: &bucketHandle{file: idx.main, offset: updatedBucketOff},
+		bucket: bucketHandle{file: idx.main, offset: updatedBucketOff},
 	}
 
 	newBucketOff, err := idx.main.extend(bucketSize)
@@ -293,7 +293,7 @@ func (idx *index) split() error {
 	}
 
 	sw := slotWriter{
-		bucket: &bucketHandle{file: idx.main, offset: newBucketOff},
+		bucket: bucketHandle{file: idx.main, offset: newBucketOff},
 	}
 
 	idx.splitBucketIdx++

@@ -72,27 +72,33 @@ func newRecoveryIterator(segments []*segment) *recoveryIterator {
 }
 
 func (it *recoveryIterator) next() (record, error) {
+	rec, _, err := it.nextInto(nil)
+	return rec, err
+}
+
+func (it *recoveryIterator) nextInto(buf []byte) (record, []byte, error) {
 	for {
 		if it.segit == nil {
 			if len(it.segments) == 0 {
-				return record{}, ErrIterationDone
+				return record{}, buf, ErrIterationDone
 			}
 			var err error
 			it.segit, err = newSegmentIterator(it.segments[0])
 			if err != nil {
-				return record{}, err
+				return record{}, buf, err
 			}
 			it.segments = it.segments[1:]
 		}
-		rec, err := it.segit.next()
+		rec, nextBuf, err := it.segit.nextInto(buf)
+		buf = nextBuf
 		if err == io.EOF || err == io.ErrUnexpectedEOF || err == errCorrupted {
 			// Truncate file to the last valid offset.
 			if err := it.segit.f.Truncate(int64(it.segit.offset)); err != nil {
-				return record{}, err
+				return record{}, buf, err
 			}
 			fi, fierr := it.segit.f.Stat()
 			if fierr != nil {
-				return record{}, fierr
+				return record{}, buf, fierr
 			}
 			logger.Printf("truncated segment %s to offset %d", fi.Name(), it.segit.offset)
 			err = ErrIterationDone
@@ -102,9 +108,9 @@ func (it *recoveryIterator) next() (record, error) {
 			continue
 		}
 		if err != nil {
-			return record{}, err
+			return record{}, buf, err
 		}
-		return rec, nil
+		return rec, buf, nil
 	}
 }
 
@@ -114,8 +120,10 @@ func (db *DB) recover() error {
 
 	segments := db.datalog.segmentsBySequenceID()
 	it := newRecoveryIterator(segments)
+	var recBuf []byte
 	for {
-		rec, err := it.next()
+		rec, nextRecBuf, err := it.nextInto(recBuf)
+		recBuf = nextRecBuf
 		if err == ErrIterationDone {
 			break
 		}

@@ -108,13 +108,18 @@ func newSegmentIterator(f *segment) (*segmentIterator, error) {
 }
 
 func (it *segmentIterator) next() (record, error) {
+	rec, _, err := it.nextInto(nil)
+	return rec, err
+}
+
+func (it *segmentIterator) nextInto(buf []byte) (record, []byte, error) {
 	// Read key and value size.
 	kvSizeBuf := it.buf
 	if _, err := io.ReadFull(it.r, kvSizeBuf); err != nil {
 		if err == io.EOF {
-			return record{}, ErrIterationDone
+			return record{}, buf, ErrIterationDone
 		}
-		return record{}, err
+		return record{}, buf, err
 	}
 
 	// Decode key size.
@@ -130,16 +135,21 @@ func (it *segmentIterator) next() (record, error) {
 
 	// Read key, value and checksum.
 	recordSize := encodedRecordSize(keySize + valueSize)
-	data := make([]byte, recordSize)
+	if cap(buf) < int(recordSize) {
+		buf = make([]byte, recordSize)
+	} else {
+		buf = buf[:recordSize]
+	}
+	data := buf
 	copy(data, kvSizeBuf)
 	if _, err := io.ReadFull(it.r, data[6:]); err != nil {
-		return record{}, err
+		return record{}, buf, err
 	}
 
 	// Verify checksum.
 	checksum := binary.LittleEndian.Uint32(data[len(data)-4:])
 	if checksum != crc32.ChecksumIEEE(data[:len(data)-4]) {
-		return record{}, errCorrupted
+		return record{}, buf, errCorrupted
 	}
 
 	offset := it.offset
@@ -152,5 +162,5 @@ func (it *segmentIterator) next() (record, error) {
 		key:       data[6 : 6+keySize],
 		value:     data[6+keySize : 6+keySize+valueSize],
 	}
-	return rec, nil
+	return rec, buf, nil
 }

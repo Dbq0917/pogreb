@@ -2,6 +2,7 @@ package pogreb
 
 import (
 	"encoding/binary"
+	"sync"
 )
 
 const (
@@ -37,7 +38,11 @@ type bucketHandle struct {
 
 func (b bucket) MarshalBinary() ([]byte, error) {
 	buf := make([]byte, bucketSize)
-	data := buf
+	b.marshalTo(buf)
+	return buf, nil
+}
+
+func (b bucket) marshalTo(buf []byte) {
 	for i := 0; i < slotsPerBucket; i++ {
 		sl := b.slots[i]
 		binary.LittleEndian.PutUint32(buf[:4], sl.hash)
@@ -48,7 +53,6 @@ func (b bucket) MarshalBinary() ([]byte, error) {
 		buf = buf[16:]
 	}
 	binary.LittleEndian.PutUint64(buf[:8], uint64(b.next))
-	return data, nil
 }
 
 func (b *bucket) UnmarshalBinary(data []byte) error {
@@ -83,19 +87,24 @@ func (b *bucketHandle) read() error {
 }
 
 func (b *bucketHandle) write() error {
-	buf, err := b.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	_, err = b.file.WriteAt(buf, b.offset)
+	buf := bucketBufferPool.Get().(*[bucketSize]byte)
+	b.marshalTo(buf[:])
+	_, err := b.file.WriteAt(buf[:], b.offset)
+	bucketBufferPool.Put(buf)
 	return err
+}
+
+var bucketBufferPool = sync.Pool{
+	New: func() interface{} {
+		return new([bucketSize]byte)
+	},
 }
 
 // slotWriter inserts and writes slots into a bucket.
 type slotWriter struct {
-	bucket      *bucketHandle
+	bucket      bucketHandle
 	slotIdx     int
-	prevBuckets []*bucketHandle
+	prevBuckets []bucketHandle
 }
 
 func (sw *slotWriter) insert(sl slot, idx *index) error {
