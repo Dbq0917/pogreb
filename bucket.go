@@ -93,6 +93,7 @@ func (b *bucketHandle) write() error {
 
 // slotWriter inserts and writes slots into a bucket.
 type slotWriter struct {
+	idx         *index
 	bucket      *bucketHandle
 	slotIdx     int
 	prevBuckets []*bucketHandle
@@ -118,9 +119,9 @@ func (sw *slotWriter) insert(sl slot, idx *index) error {
 func (sw *slotWriter) write() error {
 	// Write previous buckets first.
 	for i := len(sw.prevBuckets) - 1; i >= 0; i-- {
-		if err := sw.prevBuckets[i].write(); err != nil {
+		if err := sw.idx.writeBucket(sw.prevBuckets[i]); err != nil {
 			return err
 		}
 	}
-	return sw.bucket.write()
+	return sw.idx.writeBucket(sw.bucket)
 }

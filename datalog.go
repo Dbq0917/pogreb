@@ -150,7 +150,7 @@ func (dl *datalog) removeSegment(seg *segment) error {
 	}
 
 	// Remove segment meta from FS.
-	metaName := seg.name + segmentExt
+	metaName := segmentMetaName(seg.id, seg.sequenceID)
 	if err := dl.opts.FileSystem.Remove(metaName); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -166,17 +166,28 @@ func (dl *datalog) removeSegment(seg *segment) error {
 func (dl *datalog) readKeyValue(sl slot) ([]byte, []byte, error) {
 	off := int64(sl.offset) + 6 // Skip key size and value size.
 	seg := dl.segments[sl.segmentID]
+	seg.ioMu.RLock()
 	keyValue, err := seg.Slice(off, off+int64(sl.kvSize()))
 	if err != nil {
+		seg.ioMu.RUnlock()
 		return nil, nil, err
 	}
-	return keyValue[:sl.keySize], keyValue[sl.keySize:], nil
+	key := cloneBytes(keyValue[:sl.keySize])
+	value := cloneBytes(keyValue[sl.keySize:])
+	seg.ioMu.RUnlock()
+	return key, value, nil
 }
 
 func (dl *datalog) readKey(sl slot) ([]byte, error) {
 	off := int64(sl.offset) + 6
 	seg := dl.segments[sl.segmentID]
-	return seg.Slice(off, off+int64(sl.keySize))
+	seg.ioMu.RLock()
+	key, err := seg.Slice(off, off+int64(sl.keySize))
+	if err == nil {
+		key = cloneBytes(key)
+	}
+	seg.ioMu.RUnlock()
+	return key, err
 }
 
 // trackDel updates segment's metadata for deleted or overwritten items.
@@ -198,24 +209,35 @@ func (dl *datalog) del(key []byte) error {
 }
 
 func (dl *datalog) writeRecord(data []byte, rt recordType) (uint16, uint32, error) {
-	if dl.curSeg.meta.Full || dl.curSeg.size+int64(len(data)) > int64(dl.opts.maxSegmentSize) {
+	seg := dl.curSeg
+	rolled := false
+	for {
+		seg.ioMu.Lock()
+		needSwap := seg.meta.Full || (!rolled && seg.size+int64(len(data)) > int64(dl.opts.maxSegmentSize))
+		if !needSwap {
+			off, err := seg.append(data)
+			seg.ioMu.Unlock()
+			if err != nil {
+				return 0, 0, err
+			}
+			switch rt {
+			case recordTypePut:
+				seg.meta.PutRecords++
+			case recordTypeDelete:
+				seg.meta.DeleteRecords++
+			}
+			return seg.id, uint32(off), nil
+		}
+		seg.meta.Full = true
+		seg.ioMu.Unlock()
+
 		// Current segment is full, create a new one.
-		dl.curSeg.meta.Full = true
 		if err := dl.swapSegment(); err != nil {
 			return 0, 0, err
 		}
+		seg = dl.curSeg
+		rolled = true
 	}
-	off, err := dl.curSeg.append(data)
-	if err != nil {
-		return 0, 0, err
-	}
-	switch rt {
-	case recordTypePut:
-		dl.curSeg.meta.PutRecords++
-	case recordTypeDelete:
-		dl.curSeg.meta.DeleteRecords++
-	}
-	return dl.curSeg.id, uint32(off), nil
 }
 
 func (dl *datalog) put(key []byte, value []byte) (uint16, uint32, error) {

@@ -41,7 +41,7 @@ func (db *DB) promoteRecord(rec record) (bool, error) {
 			// Update index.
 			b.slots[i].segmentID = segmentID
 			b.slots[i].offset = offset
-			return false, b.write()
+			return false, db.index.writeBucket(&b)
 		}
 	}
 }
@@ -53,7 +53,7 @@ type CompactionResult struct {
 	ReclaimedBytes    int
 }
 
-func (db *DB) compact(sourceSeg *segment) (CompactionResult, error) {
+func (db *DB) compactSequential(sourceSeg *segment) (CompactionResult, error) {
 	cr := CompactionResult{}
 
 	db.mu.Lock()
@@ -106,11 +106,12 @@ func (db *DB) pickForCompaction() []*segment {
 	for i := len(segments) - 1; i >= 0; i-- {
 		seg := segments[i]
 
-		if uint32(seg.size) < db.opts.compactionMinSegmentSize {
+		segmentSize := seg.sizeSnapshot()
+		if uint32(segmentSize) < db.opts.compactionMinSegmentSize {
 			continue
 		}
 
-		fragmentation := float32(seg.meta.DeletedBytes) / float32(seg.size)
+		fragmentation := float32(seg.meta.DeletedBytes) / float32(segmentSize)
 		if fragmentation < db.opts.compactionMinFragmentation {
 			continue
 		}

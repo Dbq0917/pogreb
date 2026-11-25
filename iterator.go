@@ -42,8 +42,6 @@ func (it *ItemIterator) fetchItems(nextBucketIdx uint32) error {
 			if err != nil {
 				return err
 			}
-			key = cloneBytes(key)
-			value = cloneBytes(value)
 			it.queue = append(it.queue, item{key: key, value: value})
 		}
 	}

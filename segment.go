@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"sync"
 )
 
 type recordType int
@@ -25,6 +26,13 @@ type segment struct {
 	sequenceID uint64 // Logical monotonically increasing segment identifier.
 	name       string
 	meta       *segmentMeta
+	ioMu       sync.RWMutex
+}
+
+func (seg *segment) sizeSnapshot() int64 {
+	seg.ioMu.RLock()
+	defer seg.ioMu.RUnlock()
+	return seg.size
 }
 
 func segmentName(id uint16, sequenceID uint64) string {

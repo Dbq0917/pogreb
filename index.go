@@ -1,6 +1,9 @@
 package pogreb
 
 import (
+	"sync"
+	"sync/atomic"
+
 	"github.com/akrylysov/pogreb/internal/errors"
 )
 
@@ -24,6 +27,22 @@ type index struct {
 	numKeys        uint32  // Number of keys.
 	numBuckets     uint32  // Number of buckets.
 	splitBucketIdx uint32  // Index of the bucket to split on next split.
+	pageCache      map[pageKey]*cachedPage
+	cacheMu        sync.RWMutex
+	pageIO         sync.RWMutex
+	cachePages     bool
+}
+
+type pageKey struct {
+	file   *file
+	offset int64
+}
+
+type cachedPage struct {
+	bucket   bucket
+	file     *file
+	revision uint64
+	dirty    bool
 }
 
 type indexMeta struct {
@@ -101,9 +120,182 @@ func (idx *index) bucketIndex(hash uint32) uint32 {
 }
 
 type bucketIterator struct {
+	idx      *index
 	off      int64 // Offset of the next bucket.
 	f        *file // Current index file.
 	overflow *file // Overflow index file.
+}
+
+func (idx *index) readBucket(b *bucketHandle) error {
+	if idx != nil {
+		key := pageKey{file: b.file, offset: b.offset}
+		idx.cacheMu.RLock()
+		cp := idx.pageCache[key]
+		if cp != nil {
+			b.bucket = cp.bucket
+			idx.cacheMu.RUnlock()
+			return nil
+		}
+		idx.cacheMu.RUnlock()
+
+		idx.pageIO.RLock()
+		err := b.read()
+		idx.pageIO.RUnlock()
+		return err
+	}
+	return b.read()
+}
+
+func (idx *index) pinBucket(b *bucketHandle) {
+	if idx == nil {
+		return
+	}
+	idx.cacheMu.Lock()
+	defer idx.cacheMu.Unlock()
+	if idx.pageCache == nil {
+		idx.pageCache = make(map[pageKey]*cachedPage)
+	}
+	key := pageKey{file: b.file, offset: b.offset}
+	if _, ok := idx.pageCache[key]; !ok {
+		idx.pageCache[key] = &cachedPage{bucket: b.bucket, file: b.file}
+	}
+}
+
+func (idx *index) writeBucket(b *bucketHandle) error {
+	var cp *cachedPage
+	var revision uint64
+	if idx != nil {
+		idx.cacheMu.Lock()
+		key := pageKey{file: b.file, offset: b.offset}
+		cp = idx.pageCache[key]
+		if cp == nil && idx.cachePages {
+			cp = &cachedPage{}
+			idx.pageCache[key] = cp
+		}
+		if cp != nil {
+			cp.bucket = b.bucket
+			cp.file = b.file
+			revision = atomic.AddUint64(&cp.revision, 1)
+			cp.dirty = true
+		}
+		idx.cacheMu.Unlock()
+
+		idx.pageIO.Lock()
+		err := b.write()
+		idx.pageIO.Unlock()
+		if err != nil {
+			return err
+		}
+
+		if cp != nil {
+			idx.cacheMu.Lock()
+			if atomic.LoadUint64(&cp.revision) == revision {
+				cp.dirty = false
+			}
+			idx.cacheMu.Unlock()
+		}
+		return nil
+	}
+	return b.write()
+}
+
+func (idx *index) markBucketDirty(b *bucketHandle) {
+	idx.cacheMu.Lock()
+	defer idx.cacheMu.Unlock()
+	if idx.pageCache == nil {
+		idx.pageCache = make(map[pageKey]*cachedPage)
+	}
+	key := pageKey{file: b.file, offset: b.offset}
+	cp := idx.pageCache[key]
+	if cp == nil {
+		cp = &cachedPage{file: b.file}
+		idx.pageCache[key] = cp
+	}
+	cp.bucket = b.bucket
+	cp.file = b.file
+	atomic.AddUint64(&cp.revision, 1)
+	cp.dirty = true
+}
+
+type dirtyPage struct {
+	offset   int64
+	file     *file
+	data     []byte
+	page     *cachedPage
+	revision uint64
+}
+
+func (idx *index) snapshotDirtyPages() ([]dirtyPage, error) {
+	idx.cacheMu.Lock()
+	defer idx.cacheMu.Unlock()
+	pages := make([]dirtyPage, 0)
+	for key, cp := range idx.pageCache {
+		if !cp.dirty {
+			continue
+		}
+		data, err := cp.bucket.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		pages = append(pages, dirtyPage{
+			offset:   key.offset,
+			file:     cp.file,
+			data:     data,
+			page:     cp,
+			revision: atomic.LoadUint64(&cp.revision),
+		})
+	}
+	return pages, nil
+}
+
+func (idx *index) flushDirtyPages(pages []dirtyPage) error {
+	for _, page := range pages {
+		idx.pageIO.Lock()
+		current := atomic.LoadUint64(&page.page.revision)
+		var err error
+		if current == page.revision {
+			_, err = page.file.WriteAt(page.data, page.offset)
+		}
+		idx.pageIO.Unlock()
+		if err != nil {
+			return err
+		}
+
+		idx.cacheMu.Lock()
+		if atomic.LoadUint64(&page.page.revision) == page.revision {
+			page.page.dirty = false
+		}
+		idx.cacheMu.Unlock()
+	}
+	return nil
+}
+
+func (idx *index) flushAllDirtyPages() error {
+	pages, err := idx.snapshotDirtyPages()
+	if err != nil {
+		return err
+	}
+	return idx.flushDirtyPages(pages)
+}
+
+func (idx *index) beginBatchCache() {
+	idx.cacheMu.Lock()
+	defer idx.cacheMu.Unlock()
+	if idx.pageCache == nil {
+		idx.pageCache = make(map[pageKey]*cachedPage)
+	}
+	idx.cachePages = true
+}
+
+func (idx *index) endBatchCache() {
+	idx.cacheMu.Lock()
+	defer idx.cacheMu.Unlock()
+	idx.cachePages = false
+	for key, cp := range idx.pageCache {
+		if !cp.dirty {
+			delete(idx.pageCache, key)
+		}
+	}
 }
 
 // bucketOffset returns on-disk bucket offset by the bucket index.
@@ -113,6 +305,7 @@ func bucketOffset(idx uint32) int64 {
 
 func (idx *index) newBucketIterator(startBucketIdx uint32) *bucketIterator {
 	return &bucketIterator{
+		idx:      idx,
 		off:      bucketOffset(startBucketIdx),
 		f:        idx.main,
 		overflow: idx.overflow,
@@ -124,7 +317,7 @@ func (it *bucketIterator) next() (bucketHandle, error) {
 		return bucketHandle{}, ErrIterationDone
 	}
 	b := bucketHandle{file: it.f, offset: it.off}
-	if err := b.read(); err != nil {
+	if err := it.idx.readBucket(&b); err != nil {
 		return bucketHandle{}, err
 	}
 	it.f = it.overflow
@@ -159,7 +352,7 @@ func (idx *index) get(hash uint32, matchKey matchKeyFunc) error {
 }
 
 func (idx *index) findInsertionBucket(newSlot slot, matchKey matchKeyFunc) (*slotWriter, bool, error) {
-	sw := &slotWriter{}
+	sw := &slotWriter{idx: idx}
 	it := idx.newBucketIterator(idx.bucketIndex(newSlot.hash))
 	for {
 		b, err := it.next()
@@ -252,7 +445,7 @@ func (idx *index) delete(hash uint32, matchKey matchKeyFunc) error {
 				continue
 			}
 			b.del(i)
-			if err := b.write(); err != nil {
+			if err := idx.writeBucket(&b); err != nil {
 				return err
 			}
 			idx.numKeys--
@@ -268,7 +461,9 @@ func (idx *index) createOverflowBucket() (*bucketHandle, error) {
 		idx.freeBucketOffs = idx.freeBucketOffs[1:]
 	} else {
 		var err error
+		idx.pageIO.Lock()
 		off, err = idx.overflow.extend(bucketSize)
+		idx.pageIO.Unlock()
 		if err != nil {
 			return nil, err
 		}
@@ -284,15 +479,19 @@ func (idx *index) split() error {
 	updatedBucketIdx := idx.splitBucketIdx
 	updatedBucketOff := bucketOffset(updatedBucketIdx)
 	updatedBucket := slotWriter{
+		idx:    idx,
 		bucket: &bucketHandle{file: idx.main, offset: updatedBucketOff},
 	}
 
+	idx.pageIO.Lock()
 	newBucketOff, err := idx.main.extend(bucketSize)
+	idx.pageIO.Unlock()
 	if err != nil {
 		return err
 	}
 
 	sw := slotWriter{
+		idx:    idx,
 		bucket: &bucketHandle{file: idx.main, offset: newBucketOff},
 	}
 
@@ -346,6 +545,9 @@ func (idx *index) split() error {
 }
 
 func (idx *index) close() error {
+	if err := idx.flushAllDirtyPages(); err != nil {
+		return err
+	}
 	if err := idx.writeMeta(); err != nil {
 		return err
 	}

@@ -33,7 +33,7 @@ func (db *DB) Backup(path string) error {
 		if !seg.meta.Full {
 			// Save the size of the active segments to copy only the data persisted up to the point
 			// of when the backup started.
-			activeSegmentSizes[seg.id] = seg.size
+			activeSegmentSizes[seg.id] = seg.sizeSnapshot()
 		}
 	}
 	db.mu.RUnlock()

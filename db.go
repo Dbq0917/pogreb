@@ -203,7 +203,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 			return true, err
 		}
 		if bytes.Equal(key, slKey) {
-			retValue = cloneBytes(value)
+			retValue = value
 			return true, nil
 		}
 		db.metrics.HashCollisions.Add(1)
