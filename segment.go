@@ -25,6 +25,11 @@ type segment struct {
 	sequenceID uint64 // Logical monotonically increasing segment identifier.
 	name       string
 	meta       *segmentMeta
+
+	compressed  bool
+	logicalSize int64 // Size of the uncompressed record stream, including headerSize.
+	blocks      []blockInfo
+	comp        *blockCompressor
 }
 
 func segmentName(id uint16, sequenceID uint64) string {
@@ -93,21 +98,45 @@ type segmentIterator struct {
 	offset uint32
 	r      *bufio.Reader
 	buf    []byte // kv size and crc32 reusable buffer.
+
+	compressed     bool
+	blocks         []blockInfo
+	nextBlock      int
+	blockData      []byte
+	blockPos       int
+	currentBlock   blockInfo
+	truncateOffset int64
 }
 
 func newSegmentIterator(f *segment) (*segmentIterator, error) {
 	if _, err := f.Seek(int64(headerSize), io.SeekStart); err != nil {
 		return nil, err
 	}
-	return &segmentIterator{
-		f:      f,
-		offset: headerSize,
-		r:      bufio.NewReader(f),
-		buf:    make([]byte, 6),
-	}, nil
+	it := &segmentIterator{
+		f:              f,
+		offset:         headerSize,
+		r:              bufio.NewReader(f),
+		buf:            make([]byte, 6),
+		truncateOffset: int64(headerSize),
+	}
+	if f.compressed {
+		it.compressed = true
+		it.blocks = append([]blockInfo(nil), f.blocks...)
+	}
+	return it, nil
+}
+
+func (it *segmentIterator) recoveryTruncateOffset() int64 {
+	if it.compressed {
+		return it.truncateOffset
+	}
+	return int64(it.offset)
 }
 
 func (it *segmentIterator) next() (record, error) {
+	if it.compressed {
+		return it.nextCompressed()
+	}
 	// Read key and value size.
 	kvSizeBuf := it.buf
 	if _, err := io.ReadFull(it.r, kvSizeBuf); err != nil {

@@ -86,15 +86,16 @@ func (it *recoveryIterator) next() (record, error) {
 		}
 		rec, err := it.segit.next()
 		if err == io.EOF || err == io.ErrUnexpectedEOF || err == errCorrupted {
+			truncateOffset := it.segit.recoveryTruncateOffset()
 			// Truncate file to the last valid offset.
-			if err := it.segit.f.Truncate(int64(it.segit.offset)); err != nil {
+			if err := it.segit.f.truncateTo(truncateOffset); err != nil {
 				return record{}, err
 			}
 			fi, fierr := it.segit.f.Stat()
 			if fierr != nil {
 				return record{}, fierr
 			}
-			logger.Printf("truncated segment %s to offset %d", fi.Name(), it.segit.offset)
+			logger.Printf("truncated segment %s to offset %d", fi.Name(), truncateOffset)
 			err = ErrIterationDone
 		}
 		if err == ErrIterationDone {

@@ -54,6 +54,11 @@ Record
 
 The Record Type field is either `Put` (0) or `Delete` (1).
 
+Records are grouped into independently decodable compressed blocks. Block boundaries align with record boundaries and
+the slot offset still refers to the record's position in the uncompressed stream. A block index maps that logical offset
+to its physical block, so point lookups decompress at most one block rather than the whole segment. Segments written by
+older versions remain readable as a continuous record stream.
+
 ## Hash table index
 
 Pogreb uses two files to store the hash table on disk - "main" and "overflow" index files.

@@ -100,6 +100,9 @@ func (dl *datalog) openSegment(name string, id uint16, seqID uint64) (*segment, 
 		name:       name,
 		meta:       meta,
 	}
+	if err := seg.initBlockFormat(); err != nil {
+		return nil, err
+	}
 
 	return seg, nil
 }
@@ -166,7 +169,7 @@ func (dl *datalog) removeSegment(seg *segment) error {
 func (dl *datalog) readKeyValue(sl slot) ([]byte, []byte, error) {
 	off := int64(sl.offset) + 6 // Skip key size and value size.
 	seg := dl.segments[sl.segmentID]
-	keyValue, err := seg.Slice(off, off+int64(sl.kvSize()))
+	keyValue, err := seg.readLogicalRange(off, int64(sl.kvSize()))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -176,7 +179,7 @@ func (dl *datalog) readKeyValue(sl slot) ([]byte, []byte, error) {
 func (dl *datalog) readKey(sl slot) ([]byte, error) {
 	off := int64(sl.offset) + 6
 	seg := dl.segments[sl.segmentID]
-	return seg.Slice(off, off+int64(sl.keySize))
+	return seg.readLogicalRange(off, int64(sl.keySize))
 }
 
 // trackDel updates segment's metadata for deleted or overwritten items.
@@ -198,14 +201,17 @@ func (dl *datalog) del(key []byte) error {
 }
 
 func (dl *datalog) writeRecord(data []byte, rt recordType) (uint16, uint32, error) {
-	if dl.curSeg.meta.Full || dl.curSeg.size+int64(len(data)) > int64(dl.opts.maxSegmentSize) {
+	if dl.curSeg.meta.Full || dl.curSeg.exceedsMaxSegmentSize(len(data), dl.opts.maxSegmentSize) {
 		// Current segment is full, create a new one.
 		dl.curSeg.meta.Full = true
+		if err := dl.curSeg.finishBlock(); err != nil {
+			return 0, 0, err
+		}
 		if err := dl.swapSegment(); err != nil {
 			return 0, 0, err
 		}
 	}
-	off, err := dl.curSeg.append(data)
+	off, err := dl.curSeg.appendRecord(data)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -223,6 +229,9 @@ func (dl *datalog) put(key []byte, value []byte) (uint16, uint32, error) {
 }
 
 func (dl *datalog) sync() error {
+	if err := dl.curSeg.flushBlock(); err != nil {
+		return err
+	}
 	return dl.curSeg.Sync()
 }
 
@@ -230,6 +239,9 @@ func (dl *datalog) close() error {
 	for _, seg := range dl.segments {
 		if seg == nil {
 			continue
+		}
+		if err := seg.finishBlock(); err != nil {
+			return err
 		}
 		if err := seg.Close(); err != nil {
 			return err

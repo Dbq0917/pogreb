@@ -58,7 +58,11 @@ func (db *DB) compact(sourceSeg *segment) (CompactionResult, error) {
 
 	db.mu.Lock()
 	sourceSeg.meta.Full = true // Prevent writes to the compacted file.
+	err := sourceSeg.finishBlock()
 	db.mu.Unlock()
+	if err != nil {
+		return cr, err
+	}
 
 	it, err := newSegmentIterator(sourceSeg)
 	if err != nil {
