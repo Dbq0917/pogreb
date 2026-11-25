@@ -323,8 +323,8 @@ func (db *DB) Put(key []byte, value []byte) error {
 	return nil
 }
 
-func (db *DB) del(h uint32, key []byte, writeWAL bool) error {
-	err := db.index.delete(h, func(sl slot) (b bool, e error) {
+func (db *DB) del(h uint32, key []byte, writeWAL bool) (bool, error) {
+	return db.index.delete(h, func(sl slot) (bool, error) {
 		if uint16(len(key)) != sl.keySize {
 			return false, nil
 		}
@@ -333,31 +333,16 @@ func (db *DB) del(h uint32, key []byte, writeWAL bool) error {
 			return true, err
 		}
 		if bytes.Equal(key, slKey) {
-			db.datalog.trackDel(sl)
-			var err error
 			if writeWAL {
-				err = db.datalog.del(key)
+				if err := db.datalog.del(key); err != nil {
+					return true, err
+				}
 			}
-			return true, err
+			db.datalog.trackDel(sl)
+			return true, nil
 		}
 		return false, nil
 	})
-	return err
-}
-
-// Delete deletes the given key from the DB.
-func (db *DB) Delete(key []byte) error {
-	h := db.hash(key)
-	db.metrics.Dels.Add(1)
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if err := db.del(h, key, true); err != nil {
-		return err
-	}
-	if db.syncWrites {
-		return db.sync()
-	}
-	return nil
 }
 
 // Close closes the DB.

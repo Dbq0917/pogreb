@@ -186,7 +186,9 @@ func TestCompaction(t *testing.T) {
 		for j := byte(0); j < (maxItemsPerFile*2)-1; j++ {
 			assert.Nil(t, db.Put([]byte{j}, []byte{j}))
 		}
-		assert.Nil(t, db.Delete([]byte{maxItemsPerFile}))
+		deleted, err := db.Delete([]byte{maxItemsPerFile})
+		assert.Nil(t, err)
+		assert.Equal(t, true, deleted)
 		assert.Nil(t, db.Put([]byte{maxItemsPerFile}, []byte{0}))
 		assert.Nil(t, db.Put([]byte{maxItemsPerFile + 1}, []byte{0}))
 
@@ -208,7 +210,9 @@ func TestCompaction(t *testing.T) {
 		}
 		// Delete items.
 		for i := byte(0); i < maxItemsPerFile; i++ {
-			assert.Nil(t, db.Delete([]byte{i}))
+			deleted, err := db.Delete([]byte{i})
+			assert.Nil(t, err)
+			assert.Equal(t, true, deleted)
 		}
 		assert.Equal(t, 2, countSegments(t, db))
 		assert.Equal(t, &segmentMeta{Full: true, PutRecords: 42, DeletedKeys: 42, DeletedBytes: 504}, db.datalog.segments[0].meta)

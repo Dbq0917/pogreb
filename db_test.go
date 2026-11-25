@@ -159,7 +159,9 @@ func fullTest(t *testing.T, getFunc func(db *DB, key []byte) ([]byte, error)) {
 			t.Fatal(has, err)
 		}
 	}
-	assert.Nil(t, db.Delete([]byte{128}))
+	deleted, err := db.Delete([]byte{128})
+	assert.Nil(t, err)
+	assert.Equal(t, false, deleted)
 	assert.Equal(t, uint32(0), db.Count())
 	for i = 0; i < n; i++ {
 		assert.Nil(t, db.Put([]byte{i}, []byte{i}))
@@ -174,7 +176,9 @@ func fullTest(t *testing.T, getFunc func(db *DB, key []byte) ([]byte, error)) {
 		t.Fatal(sz)
 	}
 
-	assert.Nil(t, db.Delete([]byte{128}))
+	deleted, err = db.Delete([]byte{128})
+	assert.Nil(t, err)
+	assert.Equal(t, true, deleted)
 	assert.Equal(t, uint32(254), db.Count())
 	if has, err := db.Has([]byte{128}); has || err != nil {
 		t.Fatal(has, err)
@@ -233,7 +237,9 @@ func fullTest(t *testing.T, getFunc func(db *DB, key []byte) ([]byte, error)) {
 	db, err = Open(testDBName, &Options{BackgroundSyncInterval: time.Millisecond, FileSystem: testFS})
 	assert.Nil(t, err)
 	for i = 0; i < n; i++ {
-		assert.Nil(t, db.Delete([]byte{i}))
+		deleted, err := db.Delete([]byte{i})
+		assert.Nil(t, err)
+		assert.Equal(t, true, deleted)
 	}
 	for i = 0; i < n; i++ {
 		if has, err := db.Has([]byte{i}); has || err != nil {
@@ -302,8 +308,9 @@ func TestDataRecycle(t *testing.T) {
 	v, err := db.Get([]byte{1})
 	assert.Nil(t, err)
 	assert.Equal(t, []byte{8}, v)
-	err = db.Delete([]byte{1})
+	deleted, err := db.Delete([]byte{1})
 	assert.Nil(t, err)
+	assert.Equal(t, true, deleted)
 	err = db.Put([]byte{1}, []byte{9})
 	assert.Nil(t, err)
 	assert.Equal(t, []byte{8}, v)
@@ -349,7 +356,9 @@ func TestFileError(t *testing.T) {
 		assert.Equal(t, errfileError, err)
 
 		assert.Equal(t, errfileError, db.Put(nil, nil))
-		assert.Equal(t, errfileError, db.Delete(nil))
+		deleted, deleteErr := db.Delete(nil)
+		assert.Equal(t, errfileError, deleteErr)
+		assert.Equal(t, false, deleted)
 
 		has, err := db.Has(nil)
 		assert.Equal(t, false, has)

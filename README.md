@@ -75,9 +75,26 @@ log.Printf("%s", val)
 Use the `DB.Delete()` function to delete a key-value pair:
 
 ```go
-err := db.Delete([]byte("testKey"))
+deleted, err := db.Delete([]byte("testKey"))
 if err != nil {
 	log.Fatal(err)
+}
+if !deleted {
+	log.Print("testKey did not exist")
+}
+```
+
+Use `DB.DeleteBatch()` to delete multiple keys in input order. The returned
+slice reports whether each key was present and deleted; the batch is synchronized
+once when synchronous writes are enabled:
+
+```go
+deleted, err := db.DeleteBatch([][]byte{[]byte("key1"), []byte("key2")})
+if err != nil {
+	log.Fatal(err)
+}
+for i, wasDeleted := range deleted {
+	log.Printf("key %d deleted=%v", i, wasDeleted)
 }
 ```
 

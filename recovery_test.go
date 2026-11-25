@@ -108,7 +108,9 @@ func TestRecoveryDelete(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Nil(t, db.Put([]byte{1}, []byte{1}))
 	assert.Nil(t, db.Put([]byte{2}, []byte{2}))
-	assert.Nil(t, db.Delete([]byte{1}))
+	deleted, err := db.Delete([]byte{1})
+	assert.Nil(t, err)
+	assert.Equal(t, true, deleted)
 	assert.Equal(t, uint32(1), db.Count())
 	assert.Nil(t, db.Close())
 

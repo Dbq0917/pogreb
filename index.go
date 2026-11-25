@@ -226,15 +226,15 @@ func (idx *index) put(newSlot slot, matchKey matchKeyFunc) error {
 	return nil
 }
 
-func (idx *index) delete(hash uint32, matchKey matchKeyFunc) error {
+func (idx *index) delete(hash uint32, matchKey matchKeyFunc) (bool, error) {
 	it := idx.newBucketIterator(idx.bucketIndex(hash))
 	for {
 		b, err := it.next()
 		if err == ErrIterationDone {
-			return nil
+			return false, nil
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		for i := 0; i < slotsPerBucket; i++ {
 			sl := b.slots[i]
@@ -246,17 +246,17 @@ func (idx *index) delete(hash uint32, matchKey matchKeyFunc) error {
 			}
 			match, err := matchKey(sl)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if !match {
 				continue
 			}
 			b.del(i)
 			if err := b.write(); err != nil {
-				return err
+				return true, err
 			}
 			idx.numKeys--
-			return nil
+			return true, nil
 		}
 	}
 }

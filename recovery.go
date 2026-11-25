@@ -138,7 +138,7 @@ func (db *DB) recover() error {
 			}
 			meta.PutRecords++
 		} else {
-			if err := db.del(h, rec.key, false); err != nil {
+			if _, err := db.del(h, rec.key, false); err != nil {
 				return err
 			}
 			meta.DeleteRecords++
