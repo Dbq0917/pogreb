@@ -1,6 +1,7 @@
 package pogreb
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -245,6 +246,44 @@ func TestCompaction(t *testing.T) {
 		db.mu.Unlock()
 		wg.Wait()
 	})
+}
+
+func TestCompactionBatches(t *testing.T) {
+	opts := &Options{
+		maxSegmentSize:             1024 * 1024,
+		compactionMinSegmentSize:   512,
+		compactionMinFragmentation: 0.02,
+	}
+	db, err := createTestDB(opts)
+	assert.Nil(t, err)
+
+	// Write more records than a single compaction batch can hold,
+	// then overwrite all of them to make the first iteration reclaimable.
+	const n = compactionBatchSize*2 + 100
+	key := func(i int) []byte {
+		return []byte(fmt.Sprintf("%08d", i))
+	}
+	for i := 0; i < 2; i++ {
+		for j := 0; j < n; j++ {
+			assert.Nil(t, db.Put(key(j), []byte{byte(j)}))
+		}
+	}
+
+	cr, err := db.Compact()
+	assert.Nil(t, err)
+	// All records of the first iteration are reclaimed.
+	assert.Equal(t, n, cr.ReclaimedRecords)
+	assert.Equal(t, n*len(encodePutRecord(key(0), []byte{0})), cr.ReclaimedBytes)
+	assert.Equal(t, uint32(n), db.Count())
+
+	// The index is consistent: every key maps to the latest value.
+	for j := 0; j < n; j++ {
+		value, err := db.Get(key(j))
+		assert.Nil(t, err)
+		assert.Equal(t, []byte{byte(j)}, value)
+	}
+
+	assert.Nil(t, db.Close())
 }
 
 func TestBackgroundCompaction(t *testing.T) {

@@ -218,6 +218,54 @@ func (dl *datalog) writeRecord(data []byte, rt recordType) (uint16, uint32, erro
 	return dl.curSeg.id, uint32(off), nil
 }
 
+// recordLocation is a record's position in the datalog.
+type recordLocation struct {
+	segmentID uint16
+	offset    uint32
+}
+
+// appendRecords appends records to the current segment, creating new segments as needed.
+// Records belonging to the same segment are written with a single write.
+// It returns the location of each record in the same order as the input records.
+func (dl *datalog) appendRecords(recs [][]byte, rt recordType) ([]recordLocation, error) {
+	locs := make([]recordLocation, len(recs))
+	for i := 0; i < len(recs); {
+		if dl.curSeg.meta.Full || dl.curSeg.size+int64(len(recs[i])) > int64(dl.opts.maxSegmentSize) {
+			// Current segment is full, create a new one.
+			dl.curSeg.meta.Full = true
+			if err := dl.swapSegment(); err != nil {
+				return nil, err
+			}
+		}
+		// Gather consecutive records fitting into the current segment.
+		seg := dl.curSeg
+		var size int64
+		j := i
+		for j < len(recs) && (j == i || seg.size+size+int64(len(recs[j])) <= int64(dl.opts.maxSegmentSize)) {
+			size += int64(len(recs[j]))
+			j++
+		}
+		buf := make([]byte, 0, size)
+		off := seg.size
+		for k := i; k < j; k++ {
+			locs[k] = recordLocation{segmentID: seg.id, offset: uint32(off)}
+			buf = append(buf, recs[k]...)
+			off += int64(len(recs[k]))
+		}
+		if _, err := seg.append(buf); err != nil {
+			return nil, err
+		}
+		switch rt {
+		case recordTypePut:
+			seg.meta.PutRecords += uint32(j - i)
+		case recordTypeDelete:
+			seg.meta.DeleteRecords += uint32(j - i)
+		}
+		i = j
+	}
+	return locs, nil
+}
+
 func (dl *datalog) put(key []byte, value []byte) (uint16, uint32, error) {
 	return dl.writeRecord(encodePutRecord(key, value), recordTypePut)
 }
